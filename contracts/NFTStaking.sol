@@ -4,12 +4,13 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/interfaces/IERC721.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
 import "@chainlink/contracts/src/v0.8/KeeperCompatible.sol";
+import "./IterableMapping.sol";
 
-pragma solidity ^0.8.8;
+pragma solidity ^0.8.10;
 
-contract NFTStaking is Ownable, Pausable {
+contract NFTStaking is Ownable, KeeperCompatible {
+    using IterableMapping for IterableMapping.Map;
     using SafeMath for uint256;
     using SafeMath for uint16;
 
@@ -30,14 +31,17 @@ contract NFTStaking is Ownable, Pausable {
         uint256 endDate;
     }
 
-    IERC20 private token;
-    IERC721 private nft;
+    IERC20 public token;
+    IERC721 public nft;
 
-    mapping(address => User) public users;
-    mapping(uint16 => address) public nftDepositor;
+    mapping(uint8 => mapping(address => User)) public users;
 
-    Pool public poolInfo;
-    uint16[] public nftsDeposited;
+    IterableMapping.Map internal nftInfo;
+
+    uint256 internal counter;
+    uint256 public lastAutoProcessTimestamp;
+
+    Pool[] public poolInfo;
 
     event Stake(address indexed addr, uint256 amount);
     event Claim(address indexed addr, uint256 amount);
@@ -46,57 +50,116 @@ contract NFTStaking is Ownable, Pausable {
         token = IERC20(_token);
         nft = IERC721(_nft);
 
-        poolInfo.lockPeriodInDays = 1; //1 day lock
-        poolInfo.startDate = block.timestamp;
-        poolInfo.endDate = block.timestamp + 365 days; //Staking ends in one year
-        poolInfo.rewardPerNFT = 10 * 10**18; //10 token per NFT as reward
-        poolInfo.rewardInterval = 1 hours; //10 token per hour for 1 NFT
+        lastAutoProcessTimestamp = block.timestamp;
+    }
+
+    function add(
+        uint256 _rewardPerNFT,
+        uint256 _rewardInterval,
+        uint16 _lockPeriodInDays,
+        uint256 _endDate
+    ) external onlyOwner {
+        poolInfo.push(
+            Pool({
+                rewardPerNFT: _rewardPerNFT,
+                rewardInterval: _rewardInterval,
+                lockPeriodInDays: _lockPeriodInDays,
+                endDate: _endDate,
+                startDate: block.timestamp,
+                totalDeposit: 0,
+                totalRewardDistributed: 0
+            })
+        );
     }
 
     function set(
+        uint8 _pid,
         uint256 _rewardPerNFT,
         uint256 _rewardInterval,
         uint16 _lockPeriodInDays,
         uint256 _endDate
     ) public onlyOwner {
-        poolInfo.rewardPerNFT = _rewardPerNFT;
-        poolInfo.rewardInterval = _rewardInterval;
-        poolInfo.lockPeriodInDays = _lockPeriodInDays;
-        poolInfo.endDate = _endDate;
+        Pool storage pool = poolInfo[_pid];
+
+        pool.rewardPerNFT = _rewardPerNFT;
+        pool.rewardInterval = _rewardInterval;
+        pool.lockPeriodInDays = _lockPeriodInDays;
+        pool.endDate = _endDate;
     }
 
-    // function checkUpkeep(bytes calldata checkData ) external view override returns (bool upkeepNeeded, bytes memory /* performData */) {
-    //     upkeepNeeded = (block.timestamp - lastTimeStamp) > interval;
-    // }
+    function checkUpkeep(
+        bytes calldata /* checkData */
+    )
+        external
+        view
+        override
+        returns (
+            bool upkeepNeeded,
+            bytes memory performData 
+        )
+    {
+        if (
+            (block.timestamp - lastAutoProcessTimestamp) > 1 days || counter != 0
+        ) {
+            upkeepNeeded = true;
+        } else {
+            upkeepNeeded = false;
+        }
 
-    // function performUpkeep(bytes calldata  performData ) external override {
-    //     if ((block.timestamp - lastTimeStamp) > interval ) {
-    //         lastTimeStamp = block.timestamp;
-    //         counter = counter + 1;
-    //     }
-    // }
+        performData; //silence warning
+    }
 
-    function stake(uint16 _tokenId) external whenNotPaused returns (bool) {
+    function performUpkeep(
+        bytes calldata /* performData */
+    ) external override {
+        //100 distribution per call
+        if ((block.timestamp - lastAutoProcessTimestamp) >= 1 days) {
+
+            if (counter == 0) {
+                counter = 1;
+            }
+
+            uint256 len = nftInfo.size();
+            if(len == 0) lastAutoProcessTimestamp = block.timestamp;
+
+            for (uint8 i = 0; i < 100; i++) {
+                uint256 key = nftInfo.getKeyAtIndex(counter - 1);
+                address user = nftInfo.get(key);
+
+                claimAll(user);
+                counter++;
+
+                if (counter > len) {
+                    counter = 0;
+                    lastAutoProcessTimestamp = block.timestamp;
+                    break;
+                }
+            }
+        }
+    }
+
+    function stake(uint8 _pid, uint16 _tokenId)
+        external
+        returns (bool)
+    {
         require(nft.ownerOf(_tokenId) == msg.sender, "You don't own this NFT");
 
         nft.transferFrom(msg.sender, address(this), _tokenId);
 
-        _claim(msg.sender);
+        _claim(_pid, msg.sender);
 
-        _stake(msg.sender);
+        _stake(_pid, msg.sender);
 
-        nftDepositor[_tokenId] = msg.sender;
-
-        nftsDeposited.push(_tokenId);
+        nftInfo.set(_tokenId, msg.sender);
 
         emit Stake(msg.sender, _tokenId);
 
         return true;
     }
 
-    function _stake(address _sender) internal {
-        User storage user = users[_sender];
-        Pool storage pool = poolInfo;
+    function _stake(uint8 _pid, address _sender) internal {
+        User storage user = users[_pid][_sender];
+        Pool storage pool = poolInfo[_pid];
 
         uint256 stopDepo = pool.endDate.sub(pool.lockPeriodInDays.mul(1 days));
 
@@ -105,32 +168,41 @@ contract NFTStaking is Ownable, Pausable {
             "Staking is disabled for this pool"
         );
 
-        user.totalNFTDeposited = user.totalNFTDeposited++;
-        pool.totalDeposit = pool.totalDeposit++;
+        user.totalNFTDeposited++;
+        pool.totalDeposit++;
         user.lastDepositTime = block.timestamp;
     }
 
-    function claim() public returns (bool) {
-
-        _claim(msg.sender);
+    function claimAll(address _addr) public returns (bool) {
+        uint256 len = poolInfo.length;
+        
+        for (uint8 i = 0; i < len; i++) {
+            _claim(i, _addr);
+        }
 
         return true;
     }
 
-    function canClaim(address _addr) public view returns (bool) {
-        User storage user = users[_addr];
-        Pool storage pool = poolInfo;
+    function claim(uint8 _pid) public returns (bool) {
+        _claim(_pid, msg.sender);
+
+        return true;
+    }
+
+    function canClaim(uint8 _pid, address _addr) public view returns (bool) {
+        User storage user = users[_pid][_addr];
+        Pool storage pool = poolInfo[_pid];
 
         return (block.timestamp >=
             user.lastClaimTime.add(pool.lockPeriodInDays.mul(1 days)));
     }
 
-    function unStake(uint16 _tokenId) external returns (bool) {
-        User storage user = users[msg.sender];
-        Pool storage pool = poolInfo;
+    function unStake(uint8 _pid, uint16 _tokenId) external returns (bool) {
+        User storage user = users[_pid][msg.sender];
+        Pool storage pool = poolInfo[_pid];
 
         require(
-            nftDepositor[_tokenId] == msg.sender,
+            nftInfo.get(_tokenId) == msg.sender,
             "You didin't staked this NFT"
         );
 
@@ -140,31 +212,21 @@ contract NFTStaking is Ownable, Pausable {
             "Stake still in locked state"
         );
 
-        _claim(msg.sender);
+        _claim(_pid, msg.sender);
 
         pool.totalDeposit--;
         user.totalNFTDeposited--;
 
-        uint256 len = nftsDeposited.length;
-
-        for(uint16 i = 0; i < len; i++){
-            if(nftsDeposited[i] == _tokenId){
-                nftsDeposited[i] = nftsDeposited[len - 1];
-                nftsDeposited.pop();
-                break;
-            }
-        }
-
         nft.transferFrom(address(this), msg.sender, _tokenId);
-        delete nftDepositor[_tokenId];
+        nftInfo.remove(_tokenId);
 
         return true;
     }
 
-    function _claim(address _addr) internal {
-        User storage user = users[_addr];
+    function _claim(uint8 _pid, address _addr) internal {
+        User storage user = users[_pid][_addr];
 
-        uint256 amount = payout(_addr);
+        uint256 amount = payout(_pid, _addr);
 
         if (amount > 0) {
             safeTransfer(_addr, amount);
@@ -174,21 +236,25 @@ contract NFTStaking is Ownable, Pausable {
             user.totalClaimed = user.totalClaimed.add(amount);
         }
 
-        poolInfo.totalRewardDistributed += amount;
+        poolInfo[_pid].totalRewardDistributed += amount;
 
         emit Claim(_addr, amount);
     }
 
-    function payout(address _addr) public view returns (uint256 value) {
-        User storage user = users[_addr];
-        Pool storage pool = poolInfo;
+    function payout(uint8 _pid, address _addr)
+        public
+        view
+        returns (uint256 value)
+    {
+        User storage user = users[_pid][_addr];
+        Pool storage pool = poolInfo[_pid];
 
         uint256 from = user.lastClaimTime > user.lastDepositTime
             ? user.lastClaimTime
             : user.lastDepositTime;
         uint256 to = block.timestamp > pool.endDate
             ? pool.endDate
-            : block.timestamp; 
+            : block.timestamp;
 
         if (from < to) {
             value = value.add(

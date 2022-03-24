@@ -1,27 +1,27 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.10;
 
 library IterableMapping {
     // Iterable mapping from address to uint;
     struct Map {
-        address[] keys;
-        mapping(address => uint) values;
-        mapping(address => uint) indexOf;
-        mapping(address => bool) inserted;
+        uint[] keys;
+        mapping(uint => address) values;
+        mapping(uint => uint) indexOf;
+        mapping(uint => bool) inserted;
     }
 
-    function get(Map storage map, address key) internal view returns (uint) {
+    function get(Map storage map, uint key) internal view returns (address) {
         return map.values[key];
     }
 
-    function getIndexOfKey(Map storage map, address key) internal view returns (int) {
+    function getIndexOfKey(Map storage map, uint key) internal view returns (int) {
         if(!map.inserted[key]) {
             return -1;
         }
         return int(map.indexOf[key]);
     }
 
-    function getKeyAtIndex(Map storage map, uint index) internal view returns (address) {
+    function getKeyAtIndex(Map storage map, uint index) internal view returns (uint) {
         return map.keys[index];
     }
 
@@ -31,7 +31,7 @@ library IterableMapping {
         return map.keys.length;
     }
 
-    function set(Map storage map, address key, uint val) internal {
+    function set(Map storage map, uint key, address val) internal {
         if (map.inserted[key]) {
             map.values[key] = val;
         } else {
@@ -42,7 +42,7 @@ library IterableMapping {
         }
     }
 
-    function remove(Map storage map, address key) internal {
+    function remove(Map storage map, uint key) internal {
         if (!map.inserted[key]) {
             return;
         }
@@ -52,7 +52,7 @@ library IterableMapping {
 
         uint index = map.indexOf[key];
         uint lastIndex = map.keys.length - 1;
-        address lastKey = map.keys[lastIndex];
+        uint lastKey = map.keys[lastIndex];
 
         map.indexOf[lastKey] = index;
         delete map.indexOf[key];

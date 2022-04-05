@@ -15,6 +15,7 @@ contract NFTStaking is Ownable, KeeperCompatible {
     using SafeMath for uint16;
 
     struct User {
+        uint16[] ids;
         uint16 totalNFTDeposited;
         uint256 lastClaimTime;
         uint256 lastDepositTime;
@@ -43,7 +44,8 @@ contract NFTStaking is Ownable, KeeperCompatible {
 
     Pool[] public poolInfo;
 
-    event Stake(address indexed addr, uint256 amount);
+    event Stake(address indexed addr, uint8 poolId, uint256 nftId);
+    event Unstake(address indexed addr, uint8 poolId, uint256 nftId);
     event Claim(address indexed addr, uint256 amount);
 
     constructor(address _token, address _nft) {
@@ -93,13 +95,11 @@ contract NFTStaking is Ownable, KeeperCompatible {
         external
         view
         override
-        returns (
-            bool upkeepNeeded,
-            bytes memory performData 
-        )
+        returns (bool upkeepNeeded, bytes memory performData)
     {
         if (
-            (block.timestamp - lastAutoProcessTimestamp) > 1 days || counter != 0
+            (block.timestamp - lastAutoProcessTimestamp) > 1 days ||
+            counter != 0
         ) {
             upkeepNeeded = true;
         } else {
@@ -114,13 +114,12 @@ contract NFTStaking is Ownable, KeeperCompatible {
     ) external override {
         //100 distribution per call
         if ((block.timestamp - lastAutoProcessTimestamp) >= 1 days) {
-
             if (counter == 0) {
                 counter = 1;
             }
 
             uint256 len = nftInfo.size();
-            if(len == 0) lastAutoProcessTimestamp = block.timestamp;
+            if (len == 0) lastAutoProcessTimestamp = block.timestamp;
 
             for (uint8 i = 0; i < 100; i++) {
                 uint256 key = nftInfo.getKeyAtIndex(counter - 1);
@@ -138,21 +137,20 @@ contract NFTStaking is Ownable, KeeperCompatible {
         }
     }
 
-    function stake(uint8 _pid, uint16 _tokenId)
-        external
-        returns (bool)
-    {
+    function stake(uint8 _pid, uint16 _tokenId) external returns (bool) {
+        User storage user = users[_pid][msg.sender];
+
         require(nft.ownerOf(_tokenId) == msg.sender, "You don't own this NFT");
 
         nft.transferFrom(msg.sender, address(this), _tokenId);
+        user.ids.push(_tokenId);
 
         _claim(_pid, msg.sender);
-
         _stake(_pid, msg.sender);
 
         nftInfo.set(_tokenId, msg.sender);
 
-        emit Stake(msg.sender, _tokenId);
+        emit Stake(msg.sender, _pid, _tokenId);
 
         return true;
     }
@@ -175,7 +173,7 @@ contract NFTStaking is Ownable, KeeperCompatible {
 
     function claimAll(address _addr) public returns (bool) {
         uint256 len = poolInfo.length;
-        
+
         for (uint8 i = 0; i < len; i++) {
             _claim(i, _addr);
         }
@@ -217,8 +215,19 @@ contract NFTStaking is Ownable, KeeperCompatible {
         pool.totalDeposit--;
         user.totalNFTDeposited--;
 
+        uint256 len = user.ids.length;
+
+        for (uint8 i = 0; i < len; i++) {
+            if (user.ids[i] == _tokenId) {
+                user.ids[i] = user.ids[len - 1];
+                user.ids.pop();
+            }
+        }
+
         nft.transferFrom(address(this), msg.sender, _tokenId);
         nftInfo.remove(_tokenId);
+
+        emit Unstake(msg.sender, _pid, _tokenId);
 
         return true;
     }
@@ -267,6 +276,10 @@ contract NFTStaking is Ownable, KeeperCompatible {
         }
 
         return value;
+    }
+
+    function getStakedIds(uint8 _pid, address _user) external view returns (uint16[] memory){
+        return users[_pid][_user].ids;
     }
 
     function claimStuckTokens(address _token) external onlyOwner {
